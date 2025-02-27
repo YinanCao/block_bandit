@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <script src="https://unpkg.com/jspsych@8.2.1"></script>
+    <script src="https://unpkg.com/@jspsych/plugin-html-keyboard-response@2.1.0"></script>
+    <script src="https://unpkg.com/@jspsych/plugin-html-button-response@2.1.0"></script>
+    <script src="https://unpkg.com/@jspsych/plugin-fullscreen@2.1.0"></script>
+    <script src="slider_rating.js"></script>
+    <link href="https://unpkg.com/jspsych@8.2.1/css/jspsych.css" rel="stylesheet" type="text/css" />
+</head>
+<body>
+<script>
+const jsPsych = initJsPsych({
+    on_finish: function() {
+        // jsPsych.data.displayData();
+        jsPsych.data.get().localSave('csv', 'experiment_data_3opt_v7.csv');
+    }
+});
+
+const enter_fullscreen = {
+    type: jsPsychFullscreen,
+    fullscreen_mode: true,
+};
+
+const exit_fullscreen = {
+    type: jsPsychFullscreen,
+    fullscreen_mode: false,
+};
+
+const Ntrl = [12, 12]; // Predetermined vector with multiples of 6
+const pBlocking = [1/6, 1/2];  // Adjustable proportion of trials with red outline
+const counterfactualBlocks = [[false, true, false], [true, false, false], [true, true, true]];
+const Nblocks = Ntrl.length;
+const stimuliPool = ["shape1", "shape2", "shape3", "shape4", "shape5", "shape6", "shape7", "shape8"];
+// const responseKeys = { left: '1', middle: '2', right: '3' };
+const responseKeys = { left: 'ArrowLeft', middle: 'ArrowDown', right: 'ArrowRight' };
+document.body.style.backgroundColor = 'rgb(100,100,100)';
+
+const eccentricity = 200;
+const offsetX = eccentricity * Math.cos(Math.PI / 4); // X offset for left/right
+const offsetY = eccentricity * Math.sin(Math.PI / 4); // Y offset for middle
+
+// Logistic sampling function
+function sampleDist(nlevel, llrfac=1.4386) {
+    let level_list = Array.from({length: 2*nlevel+1}, (_, i) => (i-nlevel)/nlevel);
+    let llr_list = level_list.map(l => l * llrfac);
+    let p_gen = llr_list.map(l => 1 / (1 + Math.exp(-l)));
+    let p_sum = p_gen.reduce((a,b) => a+b);
+    return p_gen.map(p => p/p_sum);
+}
+
+const stim_level = Array.from({length: 101}, (_, i) => -1 + i*0.02);
+const llr_dist = sampleDist((stim_level.length - 1)/2);
+
+function getSamples(arr, weights) {
+    let cumWeights = [];
+    weights.reduce((a, b, i) => cumWeights[i] = a + b, 0);
+    let rnd = Math.random() * cumWeights[cumWeights.length - 1];
+    
+    let samples = arr[cumWeights.findIndex(cw => cw >= rnd)];
+    
+    // Round to 2 decimal places
+    return Number(samples.toFixed(2));
+}
+
+function generateColorValues(Ntrl, stim_level, llr_dist) {
+    const lowerBound = Math.floor(Ntrl / 3);
+    const upperBound = Math.ceil(Ntrl / 3);
+    let colorValues;
+    do {
+        colorValues = Array.from({length: Ntrl}, () => getSamples(stim_level, llr_dist));
+        let negativeCount = colorValues.filter(v => v <= 0).length;
+        if (negativeCount === lowerBound || negativeCount === upperBound) break;
+    } while (true);
+    // colorValues = Array.from({length: Ntrl}, () => getSamples(stim_level, llr_dist));
+    return colorValues;
+}
+
+function generateBalancedTrials(N, shapes) {
+    const positions = [["left", "middle", "right"], ["left", "right", "middle"],
+                       ["middle", "left", "right"], ["middle", "right", "left"],
+                       ["right", "left", "middle"], ["right", "middle", "left"]];
+    let trials = [];
+    for (let i = 0; i < N / 6; i++) {
+        trials = trials.concat(positions.map(pos => ({
+            [pos[0]]: shapes[0],
+            [pos[1]]: shapes[1],
+            [pos[2]]: shapes[2]
+        })));
+    }
+    return trials.sort(() => Math.random() - 0.5);
+}
+
+async function createExperiment() {
+    let timeline = [];
+
+    timeline.push(enter_fullscreen);
+
+    let previousShapes = new Set();
+
+    for (let blk = 0; blk < Nblocks; blk++) {
+        let availableShapes = stimuliPool.filter(shape => !previousShapes.has(shape));
+        let selectedShapes = availableShapes.sort(() => 0.5 - Math.random()).slice(0, 3);
+        previousShapes = new Set([...selectedShapes].slice(0, 2));
+
+        let [optionA, optionB, optionC] = selectedShapes;
+        let [cfA, cfB, cfC] = counterfactualBlocks[blk];
+        let samples = generateColorValues(Ntrl[blk], stim_level, llr_dist);
+        let colorValuesA = cfA ? samples.map(v => -v) : [...samples];
+        let colorValuesB = cfB ? samples.map(v => -v) : [...samples];
+        let colorValuesC = cfC ? samples.map(v => -v) : [...samples];
+        let trialOrder = generateBalancedTrials(Ntrl[blk], [optionA, optionB, optionC]);
+
+        let numBlockedTrials = Math.round(Ntrl[blk] * pBlocking[blk]);
+        while (numBlockedTrials % 3 !== 0) {
+            numBlockedTrials++;  
+            if (numBlockedTrials > Ntrl[blk]) {  
+                numBlockedTrials -= 2; // Prevent exceeding total trials
+            }
+        }
+
+        const outlinePositions = [];
+        const outlineOptions = ["left", "middle", "right"];
+
+        // Distribute red outline equally among left, middle, and right positions
+        for (let i = 0; i < numBlockedTrials / 3; i++) {
+            outlinePositions.push(...outlineOptions);
+        }
+
+        // Fill the remaining trials with null (no outline)
+        const totalTrials = Ntrl[blk];
+        while (outlinePositions.length < totalTrials) {
+            outlinePositions.push(null);  // No outline for these trials
+        }
+
+        // Shuffle the array to randomly distribute outlined and non-outlined trials
+        // jsPsych.randomization.shuffle(outlinePositions);
+
+        for (let i = outlinePositions.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [outlinePositions[i], outlinePositions[j]] = [outlinePositions[j], outlinePositions[i]];
+        }
+
+        // Shuffle the order of red outline appearances
+        // jsPsych.randomization.shuffle(outlinePositions);
+
+        // timeline.push({
+        //     type: jsPsychHtmlKeyboardResponse,
+        //     stimulus: "", // Blank screen
+        //     choices: "NO_KEYS", // No keypress required
+        //     trial_duration: 3000 // Adjust this duration (in ms) as needed
+        // });
+
+        timeline.push({
+            type: jsPsychHtmlKeyboardResponse,
+            stimulus: `<div style="font-size:40px; color:white;">Block #${blk + 1}</div>`,
+            choices: [" "],
+            prompt: "Press space bar to continue.",
+            // on_start: function() {
+            // // Remove previous feedback if it exists
+            // let oldFeedback = document.getElementById("feedback-container");
+            // if (oldFeedback) {
+            //     oldFeedback.remove();
+            // }
+        // }
+        });
+
+        for (let trl = 0; trl < Ntrl[blk]; trl++) {
+        // for (let trl = 0; trl < 2; trl++) {
+            let trialStim = trialOrder[trl];
+
+            // Create a mapping of stimulus to its corresponding color array
+            let colorMap = {
+                [optionA]: colorValuesA[trl],
+                [optionB]: colorValuesB[trl],
+                [optionC]: colorValuesC[trl]
+            };
+
+            // Assign colors dynamically
+            trialStim.leftColor   = colorMap[trialStim.left];
+            trialStim.middleColor = colorMap[trialStim.middle];
+            trialStim.rightColor  = colorMap[trialStim.right];
+
+            timeline.push({
+                type: jsPsychHtmlKeyboardResponse,
+                stimulus: '<div style="font-size:40px; color:white;">+</div>',
+                choices: "NO_KEYS",
+                trial_duration: 1000
+            });
+
+            let outlineTarget = outlinePositions[trl];  // Can be "left", "middle", "right", or null
+
+            const outlineStyle = "outline: 3px solid red; outline-offset: -15px;";
+
+            timeline.push({
+                type: jsPsychHtmlKeyboardResponse,
+                stimulus: `
+                    <div style="position:relative; width:100%; height:400px; display:flex; justify-content:center; align-items:center;">
+                        <div style="position:absolute; font-size:40px; color:white;">+</div>
+
+
+
+                        <img src="./img_d/${trialStim.left}.png" width="150"
+                            style="position:absolute; left:calc(50% - ${offsetX}px); top:50%; transform:translate(-50%, -50%);
+                            ${outlineTarget === "left" ? outlineStyle : ""}">
+
+                        <img src="./img_d/${trialStim.middle}.png" width="150"
+                            style="position:absolute; left:50%; top:calc(50% + ${offsetY}px); transform:translate(-50%, -50%);
+                            ${outlineTarget === "middle" ? outlineStyle : ""}">
+
+                        <img src="./img_d/${trialStim.right}.png" width="150"
+                            style="position:absolute; left:calc(50% + ${offsetX}px); top:50%; transform:translate(-50%, -50%);
+                            ${outlineTarget === "right" ? outlineStyle : ""}">
+
+
+                        
+                    </div>`,
+                choices: [responseKeys.left, responseKeys.middle, responseKeys.right],
+
+                // Store trial data, including shape assignments and color values
+                data: {
+                    ...trialStim,  // Spread trialStim (includes left, middle, right stimuli)
+                    block: blk,
+                    trial: trl,
+                    Nsamp: Ntrl[blk],
+                    cfactA: counterfactualBlocks[blk][0],
+                    cfactB: counterfactualBlocks[blk][1],
+                    cfactC: counterfactualBlocks[blk][2],
+                    shapeA: optionA,  // Store which shape was assigned to A
+                    shapeB: optionB,  // Store which shape was assigned to B
+                    shapeC: optionC,  // Store which shape was assigned to C
+                    colorValuesA: colorValuesA[trl],  // Store color value for A
+                    colorValuesB: colorValuesB[trl],  // Store color value for B
+                    colorValuesC: colorValuesC[trl],  // Store color value for C
+                    // Directly save where A, B, and C were placed
+                    shapeA_location: Object.keys(trialStim).find(key => trialStim[key] === optionA),
+                    shapeB_location: Object.keys(trialStim).find(key => trialStim[key] === optionB),
+                    shapeC_location: Object.keys(trialStim).find(key => trialStim[key] === optionC),
+                },
+
+                on_finish: function(data) {
+                    let chosenShape = null;
+                    let chosenOption = null;
+
+                    // Determine which shape was chosen
+                    if (data.response === responseKeys.left) {
+                        chosenShape = data.left;
+                    } else if (data.response === responseKeys.middle) {
+                        chosenShape = data.middle;
+                    } else if (data.response === responseKeys.right) {
+                        chosenShape = data.right;
+                    }
+
+                    // Determine whether the chosen shape is A, B, or C
+                    chosenOption = chosenShape === data.shapeA ? "A" :
+                                   chosenShape === data.shapeB ? "B" :
+                                   chosenShape === data.shapeC ? "C" : null;
+
+                    // Store in data
+                    data.chosenShape = chosenShape;
+                    data.chosenOption = chosenOption;
+                }
+            });
+
+            // Feedback phase:
+            timeline.push({
+                type: jsPsychHtmlKeyboardResponse,
+                stimulus: function() {
+                    let lastResp = jsPsych.data.get().last(1).values()[0];
+                    let chosenSide, posStyle;
+                    
+                    if (lastResp.response === responseKeys.left) {
+                        chosenSide = 'left';
+                        posStyle = `left:calc(50% - ${offsetX}px); top:50%`;
+                    } else if (lastResp.response === responseKeys.middle) {
+                        chosenSide = 'middle';
+                        posStyle = `left:50%; top:calc(50% + ${offsetY}px)`;
+                    } else {
+                        chosenSide = 'right';
+                        posStyle = `left:calc(50% + ${offsetX}px); top:50%`;
+                    }
+
+                    let chosenStimulus = lastResp[chosenSide];
+                    let chosenColor = lastResp[chosenSide + 'Color'].toFixed(2);
+
+                    return `<div style="position:relative; width:100%; height:400px; display:flex; justify-content:center; align-items:center;">
+                        <div style="position:absolute; font-size:40px; color:white;">+</div>
+                        <img src="./img_d/${chosenStimulus}_${chosenColor}.png" width="150" style="position:absolute; ${posStyle}; transform:translate(-50%, -50%);">
+                    </div>`;
+                },
+                choices: "NO_KEYS",
+                trial_duration: 500
+            });
+        } // trial
+
+        // Slider Rating Phase after each block
+        timeline.push(getSliderRatingPhase(blk));
+
+    } // block
+    timeline.push(exit_fullscreen);
+    jsPsych.run(timeline);
+}
+
+function updateImage(imgId, shape, value) {
+    let roundedValue = Number(value).toFixed(2);
+    document.getElementById(imgId).src = `./img_d/${shape}_${roundedValue}.png`;
+}
+
+createExperiment();
+</script>
+</body>
+</html>
